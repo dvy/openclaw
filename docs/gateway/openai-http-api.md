@@ -238,6 +238,8 @@ Set `stream: true` to receive Server-Sent Events:
 - Each event line is `data: <json>`
 - Stream ends with `data: [DONE]`
 
+When the agent intentionally stays silent (for example, `NO_REPLY`), a successful completion contains no assistant text. Non-streaming responses return an empty `message.content`; streaming responses finish with `stop` and `[DONE]`, plus usage when requested. Unexplained empty results still use the existing fallback response.
+
 Failed agent runs, including whole-agent timeouts, return an error instead of a successful completion. A streaming failure emits an `error` object followed by `[DONE]`; partial content may already have reached the client. Timeout settings follow the [agent loop](/concepts/agent-loop#timeouts).
 
 Disconnecting the HTTP client cancels active source-URL downloads and the agent run. If cancellation happens while preparing input, the Gateway releases that download and does not start another input download or the agent run. This applies to both streaming and non-streaming requests.

@@ -695,6 +695,16 @@ function buildAgentPrompt(
   };
 }
 
+// Delivery removes NO_REPLY payloads; the producer's terminal metadata retains intent.
+function isSilentAgentResponse(
+  result: Awaited<ReturnType<typeof agentCommandFromGatewayIngress>>,
+): boolean {
+  return (
+    result?.meta?.terminalReplyKind === "silent-empty" ||
+    result?.meta?.terminalReply?.disposition === "silent"
+  );
+}
+
 type PendingToolCall = {
   id?: unknown;
   name?: unknown;
@@ -1088,7 +1098,9 @@ export async function handleOpenAiHttpRequest(
         });
         return true;
       }
-      const content = resolveAssistantResultText(result) || "No response from OpenClaw.";
+      const content = isSilentAgentResponse(result)
+        ? ""
+        : resolveAssistantResultText(result) || "No response from OpenClaw.";
 
       sendJson(res, 200, {
         id: runId,
@@ -1132,6 +1144,7 @@ export async function handleOpenAiHttpRequest(
   let assistantText: AssistantTextSnapshot = { text: "" };
   let pendingAssistantText: AssistantTextSnapshot | undefined;
   let finalResultText: string | undefined;
+  let finalReplyIsSilent = false;
   let finalToolCalls: ReturnType<typeof resolveStopReasonAndPendingToolCalls>["pendingToolCalls"];
   let finalUsage: OpenAiChatCompletionsUsage | undefined;
   let finalizeRequested = false;
@@ -1168,7 +1181,7 @@ export async function handleOpenAiHttpRequest(
         pending: pendingAssistantText,
         resultText: finalResultText,
         streamedText: streamedAssistantText,
-        fallbackText: finalToolCalls ? "" : "No response from OpenClaw.",
+        fallbackText: finalToolCalls || finalReplyIsSilent ? "" : "No response from OpenClaw.",
       });
       if (!text.startsWith(streamedAssistantText)) {
         finishStreamWithError({
@@ -1350,7 +1363,8 @@ export async function handleOpenAiHttpRequest(
         return;
       }
 
-      finalResultText = resolveAssistantResultText(result);
+      finalReplyIsSilent = isSilentAgentResponse(result);
+      finalResultText = finalReplyIsSilent ? "" : resolveAssistantResultText(result);
       finalToolCalls =
         stopReason === "tool_calls" && pendingToolCalls?.length ? pendingToolCalls : undefined;
       requestFinalize();

@@ -2200,6 +2200,12 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
   it.each([
     { name: "error stop", meta: { stopReason: "error" }, outcome: "failed", status: 500 },
     {
+      name: "failed run with silent reply metadata",
+      meta: { terminalReplyKind: "silent-empty" as const },
+      outcome: "failed",
+      status: 500,
+    },
+    {
       name: "run-budget timeout without error metadata",
       meta: { aborted: false, timeoutPhase: "provider", providerStarted: true },
       outcome: "failed",
@@ -2233,6 +2239,11 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
       {
         label: "an error stop reason",
         meta: { stopReason: "error" },
+        expectedPhase: "end" as const,
+      },
+      {
+        label: "silent reply metadata on a failed run",
+        meta: { terminalReplyKind: "silent-empty" as const },
         expectedPhase: "end" as const,
       },
       {
@@ -3309,6 +3320,67 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
     } finally {
       nowSpy.mockRestore();
     }
+  });
+
+  it.each(
+    [
+      { name: "embedded NO_REPLY", meta: { terminalReplyKind: "silent-empty" as const } },
+      { name: "ACP silent reply", meta: { terminalReply: { disposition: "silent" as const } } },
+    ].flatMap(({ name, meta }) =>
+      ["json", "sse", "buffered sse"].map((mode) => ({ name, meta, mode })),
+    ),
+  )("preserves intentional silence for $name ($mode)", async ({ meta, mode }) => {
+    agentCommandMock.mockClear();
+    agentCommandMock.mockImplementationOnce((async (opts: unknown) => {
+      const runId = (opts as { runId?: string } | undefined)?.runId ?? "";
+      if (mode === "buffered sse") {
+        let text = "";
+        for (const delta of ["coord", "ination ", "draft"]) {
+          text += delta;
+          emitAgentEvent({
+            runId,
+            stream: "assistant",
+            data: { text, delta, replaceable: true },
+          });
+        }
+      }
+      // Delivery removes NO_REPLY text but preserves the producer's silence metadata.
+      return {
+        payloads: [],
+        meta: { ...meta, agentMeta: { usage: { input: 5, output: 2, total: 7 } } },
+      };
+    }) as never);
+
+    const res = await postChatCompletions(enabledPort, {
+      model: "openclaw",
+      messages: [{ role: "user", content: "Keep listening." }],
+      stream: mode !== "json",
+      ...(mode !== "json" ? { stream_options: { include_usage: true } } : {}),
+    });
+    expect(res.status).toBe(200);
+    const expectedUsage = { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 };
+    if (mode === "json") {
+      const completion = (await res.json()) as OpenAI.ChatCompletion;
+      expect(completion.choices).toEqual([
+        { index: 0, message: { role: "assistant", content: "" }, finish_reason: "stop" },
+      ]);
+      expect(completion.usage).toEqual(expectedUsage);
+      return;
+    }
+
+    const data = parseSseDataLines(await res.text());
+    expect(data.at(-1)).toBe("[DONE]");
+    expect(data.filter((event) => event === "[DONE]")).toHaveLength(1);
+    const chunks = data
+      .filter((event) => event !== "[DONE]")
+      .map((event) => JSON.parse(event) as OpenAI.ChatCompletionChunk);
+    const choices = chunks.flatMap((chunk) => chunk.choices);
+    expect(choices.map((choice) => choice.delta.content ?? "").join("")).toBe("");
+    expect(choices.filter((choice) => choice.delta.role === "assistant")).toHaveLength(1);
+    expect(choices.filter((choice) => choice.finish_reason === "stop")).toHaveLength(1);
+    expect(chunks.filter((chunk) => chunk.usage).map((chunk) => chunk.usage)).toEqual([
+      expectedUsage,
+    ]);
   });
 
   it("streams SSE chunks when stream=true", async () => {
